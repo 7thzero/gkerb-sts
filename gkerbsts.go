@@ -100,9 +100,10 @@ func main() {
 	// Set the DNS Lookup in accordance with configured flags
 	config.LibDefaults.DNSLookupKDC = *dnsLookupKdc
 
+
 	//
 	// Build a kerberos client from the credentials cache
-	client, errClient := client.NewClientFromCCache(cache, config)
+	kClient, errClient := client.NewClientFromCCache(cache, config)
 	if errClient != nil{
 		log.Println("Unable to get a kerberos client from cached credentials")
 		log.Println(errClient)
@@ -111,7 +112,7 @@ func main() {
 
 	//
 	// Get an HTTP Client that can handle kerberos authentication
-	spnClient := spnego.NewClient(client, nil, "")
+	spnClient := spnego.NewClient(kClient, nil, "")
 
 	//
 	// Try to authenticate to ADFS via Kerberos
@@ -121,7 +122,35 @@ func main() {
 	adfsAuthReq.Header.Add("User-Agent", "Mozilla/5.0 (compatible, MSIE 11, Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko")
 	resp, errResp := spnClient.Do(adfsAuthReq)
 	if errResp != nil{
-		log.Println("Error trying to access url: " + adfsAuthReq.URL.Path, "\nError:", errResp)
+		log.Println("Error trying to access url via UDP: " + adfsAuthReq.URL.Path, "\nError:", errResp)
+
+		if strings.Contains(errResp.Error(), "KRB_ERR_RESPONSE_TOO_BIG"){
+			// Retry with TCP instead of UDP
+			//
+			// https://osqa-ask.wireshark.org/questions/47998/krb-error-krb5krb_err_response_too_big
+			// https://web.mit.edu/kerberos/krb5-devel/doc/appdev/refs/api/krb5_init_creds_step.html
+			//
+			config.LibDefaults.UDPPreferenceLimit = 1 				// Forces TCP. See: https://github.com/jcmturner/gokrb5/blob/master/client/network.go#L20
+
+			//
+			// Build a kerberos client from the credentials cache
+			kClient, errClient := client.NewClientFromCCache(cache, config)
+			if errClient != nil{
+				log.Println("Unable to get a kerberos client from cached credentials")
+				log.Println(errClient)
+				return
+			}
+
+			//
+			// Get an HTTP Client that can handle kerberos authentication
+			spnClient := spnego.NewClient(kClient, nil, "")
+			resp, errResp = spnClient.Do(adfsAuthReq)
+			if errResp != nil{
+				log.Println("Failed to obtain kerberos client from cached credentials via TCP. Error:", errResp)
+			}
+		}
+
+		log.Println("Error trying to access url via TCP: " + adfsAuthReq.URL.Path, "\nError:", errResp)
 		return
 	}
 
