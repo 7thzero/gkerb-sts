@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sts"
@@ -18,7 +19,9 @@ import (
 	"log"
 	"golang.org/x/net/html"
 	"net/http"
+	"os"
 	"os/user"
+	"path"
 	"strings"
 	"time"
 )
@@ -27,10 +30,18 @@ import (
  *
  * Lightly tested on Ubuntu 18.04.
  *
- * Hard coded entries all over the place, be sure to change them out with values that make sense for your environment
+ * You might need to make a change to disable systemd-resolved to get around a DNS lookup issue pertinent to Golang:
+ *  https://askubuntu.com/questions/907246/how-to-disable-systemd-resolved-in-ubuntu
+ *  https://github.com/cloudflare/cloudflared/issues/75#issuecomment-469904183
+ *  https://github.com/golang/go/issues/27546
  *
  */
 func main() {
+	idpUrl := flag.String("IdentityIrpPath", "https://adfs.dummy-domain.tld/adfs/ls/IdpInitiatedSignOn.aspx?loginToRp=urn:amazon:webservices", "Set the IdentityIRP. This is a dummy value by default to show common URL usage")
+	region := flag.String("AwsRegion", "us-east-1", "Set the AWS Region pertinent to your use case")
+	dnsLookupKdc := flag.Bool("DnsLookupKdc", true, "Set this to 'false' if you want to use a hard-coded KDC instead of performing DNS resolution")
+	autoSetAwsCreds := flag.Bool("ConfigureAwsCredentials", true, "Set to 'false' to write the credentials file to the working directory instead of overwriting the credentials stored in the user directory (~/.aws/credentials)")
+	flag.Parse()
 	//
 	// Need to know who I am to load the kerberos credentials cache
 	user, _ := user.Current()
@@ -45,14 +56,49 @@ func main() {
 	}
 
 	//
-	// If this fails to load, be sure to remove configurations specific to 'Heimdal Kerberos'
+	// If this fails to load, be sure to remove configurations specific to 'Heimdal Kerberos' in /etc/krb5.conf
+	// ex:
+	// # The following libdefaults parameters are only for Heimdal Kerberos.
+	//			fcc-mit-ticketflags = true
+	//
+	//[realm]
+	//		ATHENA.MIT.EDU = {
+	//				kdc = kerberos.mit.edu
+	//				kdc = kerberos-1.mid.edu
+	//				kdc = kerberos-2.mid.edu:88
+	//				admin_server = kerberos.mit.edu
+	//				default_domain = mit.edu
+	//		}
+	//	etc...
+	//
 	config, errLoadConfig := config.Load("/etc/krb5.conf")
 	if errLoadConfig != nil{
 		log.Println("Unable to load kerberos client configuration. Does your krb5.conf file include directives specific to Heimdal Kerberos? Those settings cause the kerb config parser to fail")
 		log.Println(errLoadConfig)
 	}
 
+	//
+	// If we are configured to do a DNS lookup to find the KDC, this document describes the relevant process for how it works
+	// https://docs.bmc.com/docs/ServerAutomation/85/configuring-after-installation/administering-security/implementing-authentication/implementing-active-directory-kerberos-authentication/configuring-a-bmc-server-automation-client-for-ad-kerberos-authentication/locating-the-active-directory-kdc-for-the-client-s-domain
+	//
+	// * nslookup -type=srv _kerberos._tcp.<CLIENT_DOMAIN>		(CLIENT_DOMAIN is the domain that your workstation or server is joined to)
+	//
+	// * The results of this query come back looking something like this (for a hypothetical workwork.work domain):
+	//
+	// $ nslookup -type=srv _kerberos._tcp.workwork.work
+	// ;; Truncated, retrying in TCP mode.
+	// Server:	172.16.0.2
+	// Address: 172.16.0.2#53
+	//
+	// _kerberos._tcp.workwork.work     service = 0 100 88 sorepaw169i.workwork.work
+	// _kerberos._tcp.workwork.work     service = 0 100 88 sorepaw165i.workwork.work
+	// _kerberos._tcp.workwork.work     service = 0 100 88 sorepaw161i.workwork.work
+	// _kerberos._tcp.workwork.work     service = 0 100 88 sorepaw163i.workwork.work
+	// _kerberos._tcp.workwork.work     service = 0 100 88 sorepaw166i.workwork.work
 
+	//
+	// Set the DNS Lookup in accordance with configured flags
+	config.LibDefaults.DNSLookupKDC = *dnsLookupKdc
 
 	//
 	// Build a kerberos client from the credentials cache
@@ -60,6 +106,7 @@ func main() {
 	if errClient != nil{
 		log.Println("Unable to get a kerberos client from cached credentials")
 		log.Println(errClient)
+		return
 	}
 
 	//
@@ -69,12 +116,13 @@ func main() {
 	//
 	// Try to authenticate to ADFS via Kerberos
 	//	Set the User-Agent to try and force SPNEGO authentication (User agent is _CRITIAL_ to get this to work!)
-	idpentryUrl := "https://adfs.domain.tld/adfs/ls/IdpInitiatedSignOn.aspx?loginToRp=urn:amazon:webservices"
-	adfsAuthReq, _ := http.NewRequest("GET", idpentryUrl, nil)
+	log.Println("***\n*** Configured to use this ADFS/IDP URL: ", *idpUrl)
+	adfsAuthReq, _ := http.NewRequest("GET", *idpUrl, nil)
 	adfsAuthReq.Header.Add("User-Agent", "Mozilla/5.0 (compatible, MSIE 11, Windows NT 6.3; Trident/7.0; rv:11.0) like Gecko")
 	resp, errResp := spnClient.Do(adfsAuthReq)
 	if errResp != nil{
-		log.Println("Error trying to access url: " + adfsAuthReq.URL.Path)
+		log.Println("Error trying to access url: " + adfsAuthReq.URL.Path, "\nError:", errResp)
+		return
 	}
 
 	var respBytes []byte
@@ -107,7 +155,7 @@ func main() {
 			}
 			break
 		case token == html.StartTagToken || token == html.SelfClosingTagToken:
-			log.Println(t.Data, t)
+			//log.Println(t.Data, t)  // Commenting out debug logging
 
 			// The SAML response is in an input tag
 			if t.Data == "input" {
@@ -198,7 +246,10 @@ func main() {
 			log.Println("Unable to assume role/get creds for: " + *role.Name()+"\nError: " + errAssumeRoleSAML.Error())
 		}
 
-		assumedRoles = append(assumedRoles, assumedRole)
+		if assumedRole.AssumedRoleUser != nil {
+			assumedRoles = append(assumedRoles, assumedRole)
+			log.Println("Generated: ", assumedRole.AssumedRoleUser.GoString())
+		}
 	}
 
 
@@ -241,7 +292,7 @@ func main() {
 		sectionName := arnSplit[1]
 
 		credentials.WriteString("["+sectionName+"]\n")
-		credentials.WriteString("region = us-east-1\n")
+		credentials.WriteString("region = "+*region+"\n")
 		credentials.WriteString("aws_access_key_id = "+*role.Credentials.AccessKeyId+"\n")
 		credentials.WriteString("output = json\n")
 		credentials.WriteString("aws_security_token = "+*role.Credentials.SessionToken+"\n")
@@ -252,9 +303,20 @@ func main() {
 	}
 
 	// Write out the file
-	//	Currently just writes out the `credentials` file to the local directory as opposed to overwriting ~/.aws/credentials
+	var awsCredsFile string
+	if *autoSetAwsCreds{
+		// **Overwrite ~/.aws/credentials
+		awsDir := path.Join(user.HomeDir, ".aws")
+		awsCredsFile = path.Join(awsDir, "credentials")
+		os.MkdirAll(awsDir, 0770)
+	} else {
+		// Place the credentials file in the working directory where this executable is running from
+		awsCredsFile = "credentials"
+	}
 	credentialsStr := credentials.String()
-	ioutil.WriteFile("credentials", []byte(credentialsStr), 0644)
+	ioutil.WriteFile(awsCredsFile, []byte(credentialsStr), 0640)
+
+	log.Println("Credentials file written to: ", awsCredsFile)
 }
 
 //
