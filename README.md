@@ -7,6 +7,7 @@ Golang implementation of [kerb-sts](https://github.com/commercehub-oss/kerb-sts)
 # How to build
 * Clone the repo
 * go build
+* Look at the scripts folder for a thought on deployment
 
 # Considerations
 This is pretty raw with a lot of hard-coded entries, so be sure to follow the code and comments so you know what needs to be changed in your environment
