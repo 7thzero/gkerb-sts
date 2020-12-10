@@ -3,21 +3,22 @@
 package main
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/xml"
 	"flag"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/sts"
+	"github.com/jcmturner/gokrb5/v8/credentials"
 	"github.com/russellhaering/gosaml2/types"
-	"bytes"
-	"encoding/base64"
-	"encoding/xml"
-	"gopkg.in/jcmturner/gokrb5.v7/client"
-	"gopkg.in/jcmturner/gokrb5.v7/config"
-	"gopkg.in/jcmturner/gokrb5.v7/credentials"
-	"gopkg.in/jcmturner/gokrb5.v7/spnego"
+
+	"golang.org/x/net/html"
+	"github.com/jcmturner/gokrb5/v8/client"
+	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/jcmturner/gokrb5/v8/config"
 	"io/ioutil"
 	"log"
-	"golang.org/x/net/html"
 	"net/http"
 	"os"
 	"os/user"
@@ -103,7 +104,7 @@ func main() {
 
 	//
 	// Build a kerberos client from the credentials cache
-	kClient, errClient := client.NewClientFromCCache(cache, config)
+	kClient, errClient := client.NewFromCCache(cache, config)
 	if errClient != nil{
 		log.Println("Unable to get a kerberos client from cached credentials")
 		log.Println(errClient)
@@ -134,7 +135,7 @@ func main() {
 
 			//
 			// Build a kerberos client from the credentials cache
-			kClient, errClient := client.NewClientFromCCache(cache, config)
+			kClient, errClient := client.NewFromCCache(cache, config)
 			if errClient != nil{
 				log.Println("Unable to get a kerberos client from cached credentials")
 				log.Println(errClient)
